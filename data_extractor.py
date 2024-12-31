@@ -18,6 +18,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DISABLE_PARAMS = True
+SKIP_VALIDATION = True
+TEST_PROBLEMS = ['p00000', 'p00001']  # Test with just these problems when skipping validation
 
 KAGGLE_PATHS = {
     'input_dir': '/kaggle/input',
@@ -92,17 +94,17 @@ class CodeNetExtractor:
 
     def extract_code_pair(self, problem_id: str, submission_id: str, language: str) -> str:
         """Extract source code for a specific submission"""
-        logger.info(f"\tExtraction start for {language}")
+        logger.info(f"\tOpening tar for {language} submission {submission_id}")
         with tarfile.open(self.codenet_tar_path, 'r') as tar:
-            logger.info(f"\tOpened tar")
+            logger.info(f"\t\tTar opened")
+
             ext = 'py' if language == 'Python' else 'java'
             file_path = f'Project_CodeNet/data/{problem_id}/{language}/{submission_id}.{ext}'
             try:
                 code_file = tar.extractfile(file_path)
                 if code_file is None:
                     raise FileNotFoundError(f"Source file not found: {file_path}")
-
-                logger.info(f"\ttar.extractfile() success")
+                logger.info(f"\t\t'tar.extractfile()' success")
                 return code_file.read().decode('utf-8', errors='replace')
             except Exception as e:
                 logger.error(f"Error extracting {file_path}: {str(e)}")
@@ -114,7 +116,11 @@ class CodeNetExtractor:
         logger.info(f"Starting dataset creation. Target: {num_pairs} pairs ({pairs_per_problem} per problem)")
 
         os.makedirs(output_dir, exist_ok=True)
-        valid_problems = self.get_valid_problems()
+        if SKIP_VALIDATION:
+            logger.info("⚠️ SKIP_VALIDATION is True - using test problems list")
+            valid_problems = TEST_PROBLEMS
+        else:
+            valid_problems = self.get_valid_problems()
 
         logger.info(f"Beginning extraction from {len(valid_problems)} valid problems...")
         pairs_extracted = 0
