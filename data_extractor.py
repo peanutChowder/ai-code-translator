@@ -11,20 +11,47 @@ import json
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+DISABLE_PARAMS = True
+
+KAGGLE_PATHS = {
+    'input_dir': '/kaggle/input',
+    'working_dir': '/kaggle/working',
+    'temp_dir': '/kaggle/working/temp',
+    'output_dir': '/kaggle/working/output'
+}
+LOCAL_PATHS = {
+    'input_dir': '/Users/jacobfeng/Downloads',
+    'working_dir': './output',
+    'temp_dir': tempfile.mkdtemp(),
+    'output_dir': './output'
+}
+PARAMS_CONFIG = {
+    'codenet_tar': 'Project_CodeNet.tar',
+    'metadata_tar': 'Project_CodeNet_metadata.tar',
+    'num_pairs': 6,
+    'pairs_per_problem': 3,
+    'paths': LOCAL_PATHS
+}
+
+class EnvConfig:
+    @staticmethod
+    def get_paths():
+        return PARAMS_CONFIG['paths']
+
 
 class CodeNetExtractor:
     def __init__(self, codenet_tar_path: str, metadata_tar_path: str):
-        """
-        Initialize the extractor with paths to CodeNet archives
+        """Initialize with paths to CodeNet archives"""
+        self.paths = EnvConfig.get_paths()
 
-        Args:
-            codenet_tar_path: Path to the main Project_CodeNet.tar
-            metadata_tar_path: Path to the Project_CodeNet_metadata.tar
-        """
-        self.codenet_tar_path = codenet_tar_path
-        self.metadata_tar_path = metadata_tar_path
-        self.temp_dir = tempfile.mkdtemp()
-        logger.info(f"Using temporary directory: {self.temp_dir}")
+        self.codenet_tar_path = os.path.join(self.paths['input_dir'], codenet_tar_path)
+        self.metadata_tar_path = os.path.join(self.paths['input_dir'], metadata_tar_path)
+
+        os.makedirs(self.paths['temp_dir'], exist_ok=True)
+        os.makedirs(self.paths['output_dir'], exist_ok=True)
+
+        logger.info(f"Using temporary directory: {self.paths['temp_dir']}")
+        logger.info(f"Using output directory: {self.paths['output_dir']}")
 
     def extract_problem_list(self) -> pd.DataFrame:
         """Extract and read the problem_list.csv from metadata archive"""
@@ -160,17 +187,29 @@ class CodeNetExtractor:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Extract Java-Python pairs from CodeNet dataset')
-    parser.add_argument('--codenet-tar', required=True, help='Path to Project_CodeNet.tar')
-    parser.add_argument('--metadata-tar', required=True, help='Path to Project_CodeNet_metadata.tar')
-    parser.add_argument('--output-dir', required=True, help='Output directory for extracted pairs')
-    parser.add_argument('--num-pairs', type=int, default=10000, help='Number of pairs to extract')
-    parser.add_argument('--pairs-per-problem', type=int, default=5, help='Maximum pairs per problem')
+    if DISABLE_PARAMS:
+        # Direct execution with Kaggle configuration
+        extractor = CodeNetExtractor(
+            PARAMS_CONFIG['codenet_tar'],
+            PARAMS_CONFIG['metadata_tar']
+        )
+        extractor.create_dataset(
+            output_dir='extracted_pairs',
+            num_pairs=PARAMS_CONFIG['num_pairs'],
+            pairs_per_problem=PARAMS_CONFIG['pairs_per_problem']
+        )
+    else:
+        # Local execution with command line arguments
+        parser = argparse.ArgumentParser(description='Extract Java-Python pairs from CodeNet dataset')
+        parser.add_argument('--codenet-tar', required=True, help='Path to Project_CodeNet.tar')
+        parser.add_argument('--metadata-tar', required=True, help='Path to Project_CodeNet_metadata.tar')
+        parser.add_argument('--output-dir', required=True, help='Output directory for extracted pairs')
+        parser.add_argument('--num-pairs', type=int, default=10000, help='Number of pairs to extract')
+        parser.add_argument('--pairs-per-problem', type=int, default=5, help='Maximum pairs per problem')
 
-    args = parser.parse_args()
-
-    extractor = CodeNetExtractor(args.codenet_tar, args.metadata_tar)
-    extractor.create_dataset(args.output_dir, args.num_pairs, args.pairs_per_problem)
+        args = parser.parse_args()
+        extractor = CodeNetExtractor(args.codenet_tar, args.metadata_tar)
+        extractor.create_dataset(args.output_dir, args.num_pairs, args.pairs_per_problem)
 
 
 if __name__ == "__main__":
