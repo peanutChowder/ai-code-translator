@@ -3,21 +3,21 @@ import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 from transformers import T5TokenizerFast
-import logging
 from tqdm import tqdm
-
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    filename='preprocessing.log'
-)
-
+import time
 
 class CodePreprocessor:
     def __init__(self):
+        print("Initializing CodePreprocessor...")
+        start_time = time.time()
+
         # Initialize tokenizer
-        self.tokenizer = T5TokenizerFast.from_pretrained('Salesforce/codet5-small')
+        try:
+            self.tokenizer = T5TokenizerFast.from_pretrained('google-t5/t5-small')
+            print("Successfully loaded T5 tokenizer")
+        except Exception as e:
+            print(f"ERROR: Failed to load tokenizer: {str(e)}")
+            raise
 
         # Special tokens for our task
         self.special_tokens = {
@@ -26,16 +26,32 @@ class CodePreprocessor:
             'start': '<START>',
             'end': '<END>'
         }
+
         # Add special tokens to tokenizer
         self.tokenizer.add_special_tokens({'additional_special_tokens': list(self.special_tokens.values())})
+        print(f"Initialization completed in {time.time() - start_time:.2f} seconds")
+
+        # Initialize counters for statistics
+        self.stats = {
+            'total_pairs_processed': 0,
+            'successful_pairs': 0,
+            'failed_pairs': 0,
+            'java_comment_removals': 0,
+            'python_comment_removals': 0
+        }
 
     def remove_comments(self, code: str, is_java: bool) -> str:
+        original_length = len(code)
+
         if is_java:
-            # Remove Java-style comments
             code = re.sub(r'//.*?\n|/\*.*?\*/', '', code, flags=re.DOTALL)
+            if len(code) != original_length:
+                self.stats['java_comment_removals'] += 1
         else:
-            # Remove Python-style comments
             code = re.sub(r'#.*?\n|\'\'\'.*?\'\'\'|""".*?"""', '', code, flags=re.DOTALL)
+            if len(code) != original_length:
+                self.stats['python_comment_removals'] += 1
+
         return code
 
     def clean_whitespace(self, code: str) -> str:
@@ -47,28 +63,9 @@ class CodePreprocessor:
         code = re.sub(r'\n\s*\n', '\n\n', code)
         return code.strip()
 
-    def standardize_java(self, java_code: str) -> str:
-        # Simplify class name - replace public class X with class Solution
-        java_code = re.sub(r'public\s+class\s+\w+', 'class Solution', java_code)
-        java_code = re.sub(r'class\s+\w+', 'class Solution', java_code)
-        return java_code
+    def preprocess_pair(self, java_code: str, python_code: str, pair_id: str = None) -> Tuple[str, str]:
+        self.stats['total_pairs_processed'] += 1
 
-    def standardize_python(self, python_code: str) -> str:
-        # Ensure consistent indentation (4 spaces)
-        lines = python_code.split('\n')
-        processed_lines = []
-        for line in lines:
-            # Convert any indentation to multiples of 4 spaces
-            stripped = line.lstrip()
-            indentation = len(line) - len(stripped)
-            if indentation > 0:
-                spaces = (indentation + 3) // 4 * 4
-                processed_lines.append(' ' * spaces + stripped)
-            else:
-                processed_lines.append(line)
-        return '\n'.join(processed_lines)
-
-    def preprocess_pair(self, java_code: str, python_code: str) -> Tuple[str, str]:
         try:
             # Clean Java code
             java_clean = self.remove_comments(java_code, is_java=True)
@@ -84,24 +81,31 @@ class CodePreprocessor:
             java_processed = f"{self.special_tokens['java_start']}\n{java_clean}"
             python_processed = f"{self.special_tokens['python_start']}\n{python_clean}"
 
+            self.stats['successful_pairs'] += 1
             return java_processed, python_processed
 
         except Exception as e:
-            logging.error(f"Error preprocessing pair: {str(e)}")
+            self.stats['failed_pairs'] += 1
+            print(f"WARNING: Failed to process pair {pair_id}: {str(e)}")
             return None, None
-
 
 def process_dataset(input_path: str, output_path: str, batch_size: int = 1000):
     """Process the dataset in batches to manage memory"""
+    print(f"Starting dataset processing - Input: {input_path}, Output: {output_path}")
+    start_time = time.time()
+
     preprocessor = CodePreprocessor()
 
     try:
         # Read input data
+        print("Reading input dataset...")
         with open(input_path, 'r') as f:
             data = json.load(f)
+        print(f"Loaded {len(data)} pairs from input dataset")
 
         processed_pairs = []
-        skipped_count = 0
+        last_save_time = time.time()
+        save_interval = 300  # Save every 5 minutes
 
         # Process in batches with progress bar
         for i in tqdm(range(0, len(data), batch_size), desc="Processing batches"):
@@ -109,9 +113,11 @@ def process_dataset(input_path: str, output_path: str, batch_size: int = 1000):
             batch_processed = []
 
             for item in batch:
+                pair_id = f"{item['problem_id']}_{item['java_submission_id']}_{item['python_submission_id']}"
                 java_proc, python_proc = preprocessor.preprocess_pair(
                     item['java_code'],
-                    item['python_code']
+                    item['python_code'],
+                    pair_id
                 )
 
                 if java_proc is not None and python_proc is not None:
@@ -122,30 +128,39 @@ def process_dataset(input_path: str, output_path: str, batch_size: int = 1000):
                         'java_processed': java_proc,
                         'python_processed': python_proc
                     })
-                else:
-                    skipped_count += 1
 
-            # Write batch to file to save memory
             processed_pairs.extend(batch_processed)
 
-            # Periodically save progress
-            if len(processed_pairs) % 5000 == 0:
+            # Save progress based on time interval
+            current_time = time.time()
+            if current_time - last_save_time > save_interval:
+                print(f"Periodic save: {len(processed_pairs)} pairs processed so far")
                 with open(output_path, 'w') as f:
                     json.dump(processed_pairs, f)
+                last_save_time = current_time
 
         # Final save
         with open(output_path, 'w') as f:
             json.dump(processed_pairs, f)
 
-        logging.info(f"Processing completed. Processed {len(processed_pairs)} pairs, skipped {skipped_count} pairs")
+        # Print final statistics
+        total_time = time.time() - start_time
+        print("\nProcessing completed:")
+        print(f"Total time: {total_time:.2f} seconds")
+        print(f"Total pairs processed: {preprocessor.stats['total_pairs_processed']}")
+        print(f"Successful pairs: {preprocessor.stats['successful_pairs']}")
+        print(f"Failed pairs: {preprocessor.stats['failed_pairs']}")
+        print(f"Java comment removals: {preprocessor.stats['java_comment_removals']}")
+        print(f"Python comment removals: {preprocessor.stats['python_comment_removals']}")
+        print(f"Average processing time per pair: {total_time/preprocessor.stats['total_pairs_processed']:.3f} seconds")
+        print(f"Success rate: {(preprocessor.stats['successful_pairs']/preprocessor.stats['total_pairs_processed'])*100:.1f}%")
 
     except Exception as e:
-        logging.error(f"Error processing dataset: {str(e)}")
+        print(f"ERROR: Critical error during dataset processing: {str(e)}")
         raise
 
-
 if __name__ == "__main__":
-    input_path = "training_data.json"
-    output_path = "processed_data.json"
+    input_path = "/kaggle/input/java-python-unprocessed/java_python_pairs_final.json"
+    output_path = "/kaggle/working/processed_pairs.json"
 
     process_dataset(input_path, output_path)
