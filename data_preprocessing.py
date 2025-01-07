@@ -6,6 +6,7 @@ from transformers import T5TokenizerFast
 from tqdm import tqdm
 import time
 
+
 class CodePreprocessor:
     def __init__(self):
         print("Initializing CodePreprocessor...")
@@ -63,6 +64,43 @@ class CodePreprocessor:
         code = re.sub(r'\n\s*\n', '\n\n', code)
         return code.strip()
 
+    def standardize_java(self, code: str) -> str:
+        """Standardize Java code formatting"""
+        # Replace class name with a standard name
+        code = re.sub(r'public\s+class\s+\w+', 'class Solution', code)
+        code = re.sub(r'class\s+\w+', 'class Solution', code)
+
+        # Standardize main method
+        code = re.sub(r'public\s+static\s+void\s+main\s*\(\s*String\s*\[\s*\]\s*\w+\s*\)',
+                      'public static void main(String[] args)', code)
+
+        # Handle potential encoding issues
+        code = code.encode('ascii', 'ignore').decode('ascii')
+
+        return code
+
+    def standardize_python(self, code: str) -> str:
+        """Standardize Python code formatting"""
+        # Convert tabs to spaces (4 spaces per tab)
+        code = code.replace('\t', '    ')
+
+        # Ensure consistent indentation (4 spaces)
+        lines = code.split('\n')
+        processed_lines = []
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped:  # If line is not empty
+                indent_level = (len(line) - len(stripped)) // 4
+                processed_lines.append('    ' * indent_level + stripped)
+            else:
+                processed_lines.append('')
+
+        # Handle potential encoding issues
+        code = '\n'.join(processed_lines)
+        code = code.encode('ascii', 'ignore').decode('ascii')
+
+        return code
+
     def preprocess_pair(self, java_code: str, python_code: str, pair_id: str = None) -> Tuple[str, str]:
         self.stats['total_pairs_processed'] += 1
 
@@ -88,6 +126,7 @@ class CodePreprocessor:
             self.stats['failed_pairs'] += 1
             print(f"WARNING: Failed to process pair {pair_id}: {str(e)}")
             return None, None
+
 
 def process_dataset(input_path: str, output_path: str, batch_size: int = 1000):
     """Process the dataset in batches to manage memory"""
@@ -152,12 +191,15 @@ def process_dataset(input_path: str, output_path: str, batch_size: int = 1000):
         print(f"Failed pairs: {preprocessor.stats['failed_pairs']}")
         print(f"Java comment removals: {preprocessor.stats['java_comment_removals']}")
         print(f"Python comment removals: {preprocessor.stats['python_comment_removals']}")
-        print(f"Average processing time per pair: {total_time/preprocessor.stats['total_pairs_processed']:.3f} seconds")
-        print(f"Success rate: {(preprocessor.stats['successful_pairs']/preprocessor.stats['total_pairs_processed'])*100:.1f}%")
+        print(
+            f"Average processing time per pair: {total_time / preprocessor.stats['total_pairs_processed']:.3f} seconds")
+        print(
+            f"Success rate: {(preprocessor.stats['successful_pairs'] / preprocessor.stats['total_pairs_processed']) * 100:.1f}%")
 
     except Exception as e:
         print(f"ERROR: Critical error during dataset processing: {str(e)}")
         raise
+
 
 if __name__ == "__main__":
     input_path = "/kaggle/input/java-python-unprocessed/java_python_pairs_final.json"
