@@ -10,6 +10,9 @@ import json
 import time
 from datetime import datetime
 
+import os
+os.path.dir
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -36,8 +39,8 @@ LOCAL_PATHS = {
 PARAMS_CONFIG = {
     'codenet_tar': 'Project_CodeNet.tar',
     'metadata_tar': 'Project_CodeNet_metadata.tar',
-    'num_pairs': 25000,
-    'pairs_per_problem': 3,
+    'num_pairs': 17240,
+    'pairs_per_problem': 8,
     'paths': LOCAL_PATHS,
 }
 
@@ -256,7 +259,7 @@ class CodeNetExtractor:
 
                         self.log_progress(f"\tSuccessfully extracted pair {i + 1} for {problem_id}", pair_start)
 
-                        if pairs_extracted % 100 == 0:
+                        if pairs_extracted % 5000 == 0:
                             save_start = time.time()
                             intermediate_path = os.path.join(
                                 output_dir,
