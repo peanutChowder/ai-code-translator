@@ -1,10 +1,13 @@
 import json
 from transformers import T5TokenizerFast
-import numpy as np
 import matplotlib.pyplot as plt
+from collections import Counter
+import numpy as np
+
+PREFIX = "original_"
 
 # Load the data
-data_path = './processed_pairs.json'  # Replace with the correct path
+data_path = './processed_pairs.json'
 with open(data_path, 'r') as f:
     data = json.load(f)
 
@@ -15,32 +18,57 @@ special_tokens = {
 }
 tokenizer.add_special_tokens(special_tokens)
 
-# Calculate sequence lengths
+# Calculate sequence lengths and collect all tokens
 sequence_lengths = []
+java_lengths = []
+python_lengths = []
+all_tokens = []
+
 for pair in data:
     java_tokens = tokenizer.encode(pair["java_processed"], add_special_tokens=True)
     python_tokens = tokenizer.encode(pair["python_processed"], add_special_tokens=True)
+    java_lengths.append(len(java_tokens))
+    python_lengths.append(len(python_tokens))
     sequence_lengths.append(len(java_tokens) + len(python_tokens))
+    all_tokens.extend(java_tokens)
+    all_tokens.extend(python_tokens)
 
-# Filter out outliers beyond the 95th percentile
-lower_bound = np.percentile(sequence_lengths, 5)
-upper_bound = np.percentile(sequence_lengths, 95)
-filtered_lengths = [length for length in sequence_lengths if lower_bound <= length <= upper_bound]
+# Count token frequencies
+token_counter = Counter(all_tokens)
+most_common_tokens = token_counter.most_common(100)
 
-# Create a histogram for filtered data
+# Save token frequencies to file
+with open(f'{PREFIX}_token_frequencies.txt', 'w') as f:
+    f.write("Token ID | Token | Frequency\n")
+    f.write("-" * 40 + "\n")
+    for token_id, freq in most_common_tokens:
+        token = tokenizer.decode([token_id])
+        f.write(f"{token_id:8d} | {token:20s} | {freq:d}\n")
+
+# Create box-and-whisker plots
 plt.figure(figsize=(10, 6))
-plt.hist(filtered_lengths, bins=20, color='blue', edgecolor='black', alpha=0.7)
-plt.title('Distribution of Sequence Lengths (Excluding Outliers)')
+plt.boxplot(sequence_lengths, vert=False, patch_artist=True, boxprops=dict(facecolor='blue', color='black'),
+            whiskerprops=dict(color='black'), capprops=dict(color='black'), medianprops=dict(color='red'))
+plt.title('Box-and-Whisker Plot: Total Sequence Lengths')
 plt.xlabel('Sequence Length')
-plt.ylabel('Frequency')
-plt.grid(axis='y', linestyle='--', alpha=0.7)
+plt.grid(axis='x', linestyle='--', alpha=0.7)
+plt.savefig(f'{PREFIX}_sequence_length_boxplot.png', dpi=300, bbox_inches='tight')
+plt.show()
 
-# Annotate to indicate outlier treatment
-plt.text(max(filtered_lengths) * 0.8, plt.ylim()[1] * 0.9,
-         f"Outliers (outside {lower_bound:.1f}-{upper_bound:.1f}) excluded",
-         fontsize=10, color='red')
+plt.figure(figsize=(10, 6))
+plt.boxplot(java_lengths, vert=False, patch_artist=True, boxprops=dict(facecolor='green', color='black'),
+            whiskerprops=dict(color='black'), capprops=dict(color='black'), medianprops=dict(color='red'))
+plt.title('Box-and-Whisker Plot: Java Token Lengths')
+plt.xlabel('Token Length')
+plt.grid(axis='x', linestyle='--', alpha=0.7)
+plt.savefig(f'{PREFIX}_java_token_length_boxplot.png', dpi=300, bbox_inches='tight')
+plt.show()
 
-# Save the plot before showing it
-plt.savefig('sequence_length_histogram.png', dpi=300, bbox_inches='tight')
-
+plt.figure(figsize=(10, 6))
+plt.boxplot(python_lengths, vert=False, patch_artist=True, boxprops=dict(facecolor='orange', color='black'),
+            whiskerprops=dict(color='black'), capprops=dict(color='black'), medianprops=dict(color='red'))
+plt.title('Box-and-Whisker Plot: Python Token Lengths')
+plt.xlabel('Token Length')
+plt.grid(axis='x', linestyle='--', alpha=0.7)
+plt.savefig(f'{PREFIX}_python_token_length_boxplot.png', dpi=300, bbox_inches='tight')
 plt.show()
