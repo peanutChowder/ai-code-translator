@@ -14,7 +14,7 @@ class CodePreprocessor:
 
         # Initialize tokenizer
         try:
-            self.tokenizer = T5TokenizerFast.from_pretrained('google-t5/t5-small')
+            self.tokenizer = T5TokenizerFast.from_pretrained('Salesforce/codet5-small')
             print("Successfully loaded T5 tokenizer")
         except Exception as e:
             print(f"ERROR: Failed to load tokenizer: {str(e)}")
@@ -55,13 +55,36 @@ class CodePreprocessor:
 
         return code
 
-    def clean_whitespace(self, code: str) -> str:
+    def clean_whitespace(self, code: str, is_java: bool = False) -> str:
         # Normalize newlines
         code = code.replace('\r\n', '\n')
-        # Remove trailing whitespace
-        code = '\n'.join(line.rstrip() for line in code.split('\n'))
-        # Remove multiple blank lines
-        code = re.sub(r'\n\s*\n', '\n\n', code)
+
+        if is_java:
+            # Preserve strings
+            strings = []
+
+            def save_string(match):
+                strings.append(match.group(0))
+                return f"__STR_{len(strings) - 1}__"
+
+            code = re.sub(r'"[^"\\]*(?:\\.[^"\\]*)*"', save_string, code)
+
+            # Aggressive whitespace removal for Java
+            code = re.sub(r'\s+', ' ', code)  # Multiple spaces to single
+            code = re.sub(r'\s*([{}()[\],;:])\s*', r'\1', code)  # Around brackets/punctuation
+            code = re.sub(r'\s*([+\-*/%=<>!&|])\s*', r'\1', code)  # Around operators
+            code = re.sub(r'\s+$', '', code)  # End of lines
+            code = re.sub(r'^\s+', '', code)  # Start of lines
+
+            # Restore strings
+            for i, s in enumerate(strings):
+                code = code.replace(f"__STR_{i}__", s)
+
+        else:
+            # Original whitespace cleaning for Python
+            code = '\n'.join(line.rstrip() for line in code.split('\n'))
+            code = re.sub(r'\n\s*\n', '\n\n', code)
+
         return code.strip()
 
     def standardize_java(self, code: str) -> str:
@@ -107,12 +130,12 @@ class CodePreprocessor:
         try:
             # Clean Java code
             java_clean = self.remove_comments(java_code, is_java=True)
-            java_clean = self.clean_whitespace(java_clean)
+            java_clean = self.clean_whitespace(java_clean, is_java=True)
             java_clean = self.standardize_java(java_clean)
 
             # Clean Python code
             python_clean = self.remove_comments(python_code, is_java=False)
-            python_clean = self.clean_whitespace(python_clean)
+            python_clean = self.clean_whitespace(python_clean, is_java=False)
             python_clean = self.standardize_python(python_clean)
 
             # Add special tokens
@@ -202,7 +225,10 @@ def process_dataset(input_path: str, output_path: str, batch_size: int = 1000):
 
 
 if __name__ == "__main__":
-    input_path = "/kaggle/input/java-python-unprocessed/java_python_pairs_final.json"
-    output_path = "/kaggle/working/processed_pairs.json"
+    # input_path = "/kaggle/input/java-python-unprocessed/java_python_pairs_final.json"
+    # output_path = "/kaggle/working/processed_pairs.json"
+
+    input_path = "extracted_pairs/java_python_pairs_final.json"
+    output_path = "data_stats/processed_pairs_less_whitespace.json"
 
     process_dataset(input_path, output_path)
