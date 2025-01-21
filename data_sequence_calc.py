@@ -1,18 +1,18 @@
 import json
-from transformers import T5TokenizerFast
+from transformers import RobertaTokenizer
 import matplotlib.pyplot as plt
 from collections import Counter
 import numpy as np
 
-PREFIX = "original_"
+PREFIX = "less_whitespace_"
 
 # Load the data
-data_path = './processed_pairs.json'
+data_path = './processed_pairs_less_whitespace.json'
 with open(data_path, 'r') as f:
     data = json.load(f)
 
 # Initialize the tokenizer
-tokenizer = T5TokenizerFast.from_pretrained("google-t5/t5-small")
+tokenizer = RobertaTokenizer.from_pretrained("Salesforce/codet5-small")
 special_tokens = {
     'additional_special_tokens': ['<JAVA>', '<PYTHON>', '<START>', '<END>']
 }
@@ -37,8 +37,26 @@ for pair in data:
 token_counter = Counter(all_tokens)
 most_common_tokens = token_counter.most_common(100)
 
-# Save token frequencies to file
-with open(f'{PREFIX}_token_frequencies.txt', 'w') as f:
+# Compute statistics
+stats = {
+    "total_sequences": len(sequence_lengths),
+    "mean_sequence_length": np.mean(sequence_lengths),
+    "median_sequence_length": np.median(sequence_lengths),
+    "std_sequence_length": np.std(sequence_lengths),
+    "mean_java_length": np.mean(java_lengths),
+    "median_java_length": np.median(java_lengths),
+    "std_java_length": np.std(java_lengths),
+    "mean_python_length": np.mean(python_lengths),
+    "median_python_length": np.median(python_lengths),
+    "std_python_length": np.std(python_lengths),
+}
+
+# Save statistics and token frequencies to file
+with open(f'{PREFIX}_statistics.txt', 'w') as f:
+    f.write("=== Sequence Statistics ===\n")
+    for key, value in stats.items():
+        f.write(f"{key}: {value:.2f}\n")
+    f.write("\n=== Token Frequencies ===\n")
     f.write("Token ID | Token | Frequency\n")
     f.write("-" * 40 + "\n")
     for token_id, freq in most_common_tokens:
