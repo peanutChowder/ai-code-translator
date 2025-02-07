@@ -2,7 +2,7 @@ import json
 import re
 from pathlib import Path
 from typing import Dict, List, Tuple
-from transformers import T5TokenizerFast
+from transformers import RobertaTokenizer
 from tqdm import tqdm
 import time
 
@@ -14,7 +14,7 @@ class CodePreprocessor:
 
         # Initialize tokenizer
         try:
-            self.tokenizer = T5TokenizerFast.from_pretrained('Salesforce/codet5-small')
+            self.tokenizer = RobertaTokenizer.from_pretrained('Salesforce/codet5-small')
             print("Successfully loaded T5 tokenizer")
         except Exception as e:
             print(f"ERROR: Failed to load tokenizer: {str(e)}")
@@ -124,7 +124,7 @@ class CodePreprocessor:
 
         return code
 
-    def preprocess_pair(self, java_code: str, python_code: str, pair_id: str = None) -> Tuple[str, str]:
+    def preprocess_pair(self, java_code: str, python_code: str, pair_id: str = None) -> tuple[None, None] | tuple[str, str]:
         self.stats['total_pairs_processed'] += 1
 
         try:
@@ -142,6 +142,13 @@ class CodePreprocessor:
             java_processed = f"{self.special_tokens['java_start']}\n{java_clean}"
             python_processed = f"{self.special_tokens['python_start']}\n{python_clean}"
 
+            # Tokenize and check length
+            java_tokens = self.tokenizer(java_processed, truncation=False, add_special_tokens=False)['input_ids']
+            python_tokens = self.tokenizer(python_processed, truncation=False, add_special_tokens=False)['input_ids']
+
+            if len(java_tokens) > 512 or len(python_tokens) > 512:
+                return None, None  # Skip pairs exceeding token limit
+
             self.stats['successful_pairs'] += 1
             return java_processed, python_processed
 
@@ -149,7 +156,6 @@ class CodePreprocessor:
             self.stats['failed_pairs'] += 1
             print(f"WARNING: Failed to process pair {pair_id}: {str(e)}")
             return None, None
-
 
 def process_dataset(input_path: str, output_path: str, batch_size: int = 1000):
     """Process the dataset in batches to manage memory"""
@@ -223,12 +229,11 @@ def process_dataset(input_path: str, output_path: str, batch_size: int = 1000):
         print(f"ERROR: Critical error during dataset processing: {str(e)}")
         raise
 
-
 if __name__ == "__main__":
     # input_path = "/kaggle/input/java-python-unprocessed/java_python_pairs_final.json"
     # output_path = "/kaggle/working/processed_pairs.json"
 
     input_path = "extracted_pairs/java_python_pairs_final.json"
-    output_path = "data_stats/processed_pairs_less_whitespace.json"
+    output_path = "final_output/512token_reduced_whitespace.json"
 
     process_dataset(input_path, output_path)

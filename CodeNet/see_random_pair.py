@@ -41,5 +41,5 @@ def print_random_pairs(file_path, num_pairs=5):
 
 
 # Example usage
-file_path = "processed_pairs.json"
+file_path = "data_stats/processed_pairs.json"
 print_random_pairs(file_path)

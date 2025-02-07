@@ -4,10 +4,10 @@ import matplotlib.pyplot as plt
 from collections import Counter
 import numpy as np
 
-PREFIX = "less_whitespace_"
+PREFIX = "data_stats/less_whitespace_"
 
 # Load the data
-data_path = './processed_pairs_less_whitespace.json'
+data_path = 'data_stats/processed_pairs_less_whitespace.json'
 with open(data_path, 'r') as f:
     data = json.load(f)
 
@@ -23,6 +23,9 @@ sequence_lengths = []
 java_lengths = []
 python_lengths = []
 all_tokens = []
+java_lengths_below_512 = 0
+python_lengths_below_512 = 0
+pairs_below_512 = 0
 
 for pair in data:
     java_tokens = tokenizer.encode(pair["java_processed"], add_special_tokens=True)
@@ -32,6 +35,14 @@ for pair in data:
     sequence_lengths.append(len(java_tokens) + len(python_tokens))
     all_tokens.extend(java_tokens)
     all_tokens.extend(python_tokens)
+
+    if len(python_tokens) <= 512:
+        python_lengths_below_512 += 1
+    if len(java_tokens) <= 512:
+        java_lengths_below_512 += 1
+
+    if len(python_tokens) <= 512 and len(java_tokens) <= 512:
+        pairs_below_512 += 1
 
 # Count token frequencies
 token_counter = Counter(all_tokens)
@@ -49,6 +60,9 @@ stats = {
     "mean_python_length": np.mean(python_lengths),
     "median_python_length": np.median(python_lengths),
     "std_python_length": np.std(python_lengths),
+    "python_tokens_<= 512": python_lengths_below_512,
+    "java_tokens_<= 512": java_lengths_below_512,
+    "pairs <= 512": pairs_below_512
 }
 
 # Save statistics and token frequencies to file

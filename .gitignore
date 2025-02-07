@@ -1,3 +1,6 @@
 .idea/
 *.json
 venv/
+*.txt
+*.png
+.DS_Store

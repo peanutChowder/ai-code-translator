@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import Dataset
 from transformers import (
     T5ForConditionalGeneration,
-    T5TokenizerFast,
+    RobertaTokenizer,
     Trainer,
     TrainingArguments
 )
@@ -82,11 +82,12 @@ class CodeTranslationDataset(Dataset):
         }
 
 
+
 def compute_metrics(eval_pred):
     """Custom metrics computation"""
     predictions, labels = eval_pred
     # Get the tokenizer
-    tokenizer = T5TokenizerFast.from_pretrained("t5-small")
+    tokenizer = RobertaTokenizer.from_pretrained('Salesforce/codet5-small')
     special_tokens = {
         'additional_special_tokens': [
             '<JAVA>',
@@ -124,10 +125,11 @@ def compute_metrics(eval_pred):
     }
 
 
+
 def main():
     # Initialize model and tokenizer
-    model = T5ForConditionalGeneration.from_pretrained("google-t5/t5-small")
-    tokenizer = T5TokenizerFast.from_pretrained("google-t5/t5-small")
+    model = T5ForConditionalGeneration.from_pretrained('Salesforce/codet5-small')
+    tokenizer = RobertaTokenizer.from_pretrained('Salesforce/codet5-small')
 
     # Add special tokens to model and tokenizer
     special_tokens = {
@@ -143,7 +145,7 @@ def main():
 
     # Load data
     print("Loading datasets...")
-    with open('/kaggle/input/java-python-processed/processed_pairs.json', 'r') as f:
+    with open('/kaggle/input/ct-processed/processed_pairs.json', 'r') as f:
         data = json.load(f)
 
 
@@ -161,9 +163,13 @@ def main():
     training_args = TrainingArguments(
         output_dir="/kaggle/working/java-python-translator",
         num_train_epochs=3,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
-        gradient_accumulation_steps=4,  # Effective batch size = 8 * 4 = 32
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=4,
+        gradient_accumulation_steps=4,
+        gradient_checkpointing=True,
+        eval_accumulation_steps=8,
+        dataloader_num_workers=2,
+        dataloader_pin_memory=True,
         warmup_ratio=0.1,
         weight_decay=0.01,
         logging_dir="/kaggle/working/logs",
@@ -176,7 +182,7 @@ def main():
         load_best_model_at_end=True,
         metric_for_best_model="bleu",
         greater_is_better=True,
-        fp16=True,  # Mixed precision training
+        fp16=True
     )
 
     # Initialize trainer
