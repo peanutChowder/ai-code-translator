@@ -1,5 +1,6 @@
 .idea/
 *.json
+*.jsonl
 venv/
 *.txt
 *.png
