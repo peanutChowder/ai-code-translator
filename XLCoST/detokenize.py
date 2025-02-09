@@ -2,75 +2,70 @@
 import sys
 import json
 import re
+from transformers import RobertaTokenizer
+from collections import Counter
 
-# Regex to detect tokens that are purely punctuation or bracket-like
-# We'll treat them differently from identifiers/keywords.
+########################
+# 0) Set up CodeT5 Tokenizer
+########################
+MODEL_NAME = "Salesforce/codet5-base"  # or "Salesforce/codet5-small", etc.
+tokenizer = RobertaTokenizer.from_pretrained(MODEL_NAME)
+
+# Regex to detect punctuation or bracket-like tokens
 PUNCT_REGEX = re.compile(r'^[\[\]{}().;,+\-*/<>=&|^%!?:@#~]+$')
 
-# We remove/ignore "▁" (if it appears), but do NOT remove "NEW_LINE".
-# Instead, we will explicitly convert "NEW_LINE" into a real line break below.
+# We remove "▁" if it appears, but do NOT remove "NEW_LINE".
 SPECIAL_PLACEHOLDERS = {"▁"}
 
-def untokenize_java(tokens):
-    """
-    Reconstruct code from a list of Java tokens with improved handling of '.'.
-    Steps:
-      1) Convert "NEW_LINE" tokens into an actual newline, remove "▁" placeholders.
-      2) If a token is ".", we try to merge it with the previous or next token (e.g. "System . out" -> "System.out").
-      3) Otherwise:
-         - If the token matches punctuation (PUNCT_REGEX), we stick it directly to the previous token (no extra space).
-         - Else (alphanumeric keyword, etc.), we prepend a space if needed.
-      4) Return a multi-line string where "NEW_LINE" tokens have become real newlines.
-    """
 
-    # -- First pass: handle placeholders and NEW_LINE differently --
+########################
+# 1) Untokenization
+########################
+
+def untokenize_code(tokens):
+    """
+    Generic function for both Java/Python tokens:
+      - Convert "NEW_LINE" => "\n"
+      - Remove "▁"
+      - Merge '.' with neighbors if possible
+      - Attach punctuation to preceding chunk, etc.
+    """
+    # First pass: remove placeholders and convert NEW_LINE
     filtered = []
     for t in tokens:
         if t == "NEW_LINE":
-            # Convert "NEW_LINE" to an actual newline token
             filtered.append("\n")
         elif t in SPECIAL_PLACEHOLDERS:
-            # Remove tokens like "▁"
             continue
         else:
             filtered.append(t)
 
-    # -- Second pass: merge '.' with neighboring tokens if possible --
+    # Second pass: try merging '.' with the next token if it's not punctuation or newline
     merged = []
     i = 0
     while i < len(filtered):
         tok = filtered[i]
-
-        # If tok is ".", see if next token is an identifier (so we can do e.g. System.out)
         if tok == "." and merged:
-            prev = merged[-1]  # last token in 'merged'
+            prev = merged[-1]
             nxt = filtered[i + 1] if (i + 1 < len(filtered)) else None
-
-            # If next token is not punctuation or a newline, merge them
             if nxt and nxt != "\n" and not PUNCT_REGEX.match(nxt):
                 merged[-1] = prev + "." + nxt
                 i += 2
             else:
-                # Just attach the dot to 'prev'
                 merged[-1] = prev + "."
                 i += 1
         else:
             merged.append(tok)
             i += 1
 
-    # -- Final pass: build the output code string --
-    #    If it's punctuation (e.g. '('), attach directly; if it's '\n', insert a newline;
-    #    otherwise add a space if needed.
+    # Final pass: build the output code string
     output_parts = []
     for tok in merged:
         if tok == "\n":
-            # Insert an actual line break in the final code
             output_parts.append("\n")
         elif PUNCT_REGEX.match(tok):
-            # It's punctuation, attach to the previous chunk (no space)
+            # punctuation -> attach to previous chunk if possible
             if output_parts:
-                # If the last chunk ends with a newline, we just append.
-                # Otherwise, we combine them with no space.
                 if output_parts[-1].endswith("\n"):
                     output_parts.append(tok)
                 else:
@@ -78,66 +73,158 @@ def untokenize_java(tokens):
             else:
                 output_parts.append(tok)
         else:
-            # It's an identifier, keyword, or number
-            # Add a space if the last chunk doesn't end with space or newline
+            # normal identifier/keyword/number
             if output_parts and not (output_parts[-1].endswith(" ") or output_parts[-1].endswith("\n")):
                 output_parts[-1] += " "
             output_parts.append(tok)
 
-    # Join them all
     code_str = "".join(output_parts)
-
-    # Strip any leading or trailing whitespace/newlines
     return code_str.strip("\n")
 
-def preprocess_xlcost_java(input_jsonl, output_txt, field_name="docstring_tokens"):
+
+########################
+# 2) Load & Filter by CodeT5 subwords
+########################
+
+def load_and_filter_with_subwords(input_jsonl, field_name, language_tag, lengths_list):
     """
-    Reads a JSONL file (XLCoST style), extracts the token list from `field_name`,
-    reconstructs the code with improved spacing/punctuation, and writes each snippet
-    to `output_txt`. Note that the snippet might span multiple lines if "NEW_LINE" tokens appear.
+    Reads a JSONL file (XLCoST style), extracts 'tokens' from `field_name`,
+    untokenizes them to get raw code, and counts subword tokens via CodeT5 tokenizer.
+
+    *Only* keeps snippets whose CodeT5 subword length <= 512.
+
+    :param input_jsonl: path to JSONL file
+    :param field_name: e.g. "docstring_tokens" or "code_tokens"
+    :param language_tag: "<JAVA>" or "<PYTHON>"
+    :param lengths_list: a list to store subword lengths for histogram
+    :return: a list of (lang_tag, code_str) for the final data
     """
-    with open(input_jsonl, 'r', encoding='utf-8') as fin, \
-         open(output_txt, 'w', encoding='utf-8') as fout:
-        
+    results = []
+    with open(input_jsonl, 'r', encoding='utf-8') as fin:
         for line in fin:
             line = line.strip()
             if not line:
-                continue  # skip empty lines
-            
-            # Parse JSON
+                continue
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
-                continue  # skip malformed lines
+                continue
 
-            # Extract tokens for the field
             tokens = data.get(field_name, [])
             if not isinstance(tokens, list) or not tokens:
-                # If there's no valid token list, skip
                 continue
-            
-            # Reconstruct into code (potentially multi-line)
-            code_str = untokenize_java(tokens)
-            if code_str:
-                # Write the snippet
-                fout.write(code_str + "\n")
+
+            # Convert tokens => raw code string
+            code_str = untokenize_code(tokens)
+
+            # Now count subwords with CodeT5 tokenizer
+            subword_ids = tokenizer.encode(code_str, add_special_tokens=True)
+            subword_len = len(subword_ids)
+
+            # Skip if over 512
+            if subword_len > 512:
+                continue
+
+            # Otherwise keep it
+            lengths_list.append(subword_len)
+            results.append((language_tag, code_str))
+
+    return results
+
+
+########################
+# 3) Interleave & Write
+########################
+
+def interleave_and_write(java_data, python_data, output_path):
+    """
+    Interleave two lists of (lang_tag, code_str) and write
+    them to `output_path`, e.g. <JAVA> snippet, <PYTHON> snippet, etc.
+    """
+    max_len = max(len(java_data), len(python_data))
+
+    with open(output_path, 'w', encoding='utf-8') as fout:
+        idx_j = 0
+        idx_p = 0
+        for i in range(max_len):
+            if idx_j < len(java_data):
+                lang_tag, code_str = java_data[idx_j]
+                fout.write(f"{lang_tag}\n{code_str}\n\n")
+                idx_j += 1
+
+            if idx_p < len(python_data):
+                lang_tag, code_str = python_data[idx_p]
+                fout.write(f"{lang_tag}\n{code_str}\n\n")
+                idx_p += 1
+
+
+########################
+# 4) Print Histograms
+########################
+
+def print_histogram(lengths, lang_name):
+    """
+    Print a simple histogram of snippet subword lengths for the given language.
+    bins can be adjusted if needed.
+    """
+    bins = [0, 128, 256, 512, 1024, 2048, 4096, 9999999]
+    bin_labels = [
+        "0-128", "129-256", "257-512", "513-1024",
+        "1025-2048", "2049-4096", "4097+"
+    ]
+    counts = [0]*(len(bins)-1)
+
+    for length in lengths:
+        for i in range(len(bins)-1):
+            if bins[i] <= length <= bins[i+1]:
+                counts[i] += 1
+                break
+
+    total = len(lengths)
+    print(f"\nHistogram of CodeT5 subword token lengths for {lang_name}:")
+    for label, c in zip(bin_labels, counts):
+        perc = (c / total * 100) if total else 0
+        print(f"  {label:>9}: {c} snippets ({perc:.1f}%)")
+    print(f"  Total {lang_name} snippets: {total}\n")
+
+
+########################
+# 5) Main
+########################
 
 if __name__ == "__main__":
     """
     Example usage:
-       python preprocess_xlcost_java.py xlcost_java.jsonl xlcost_java_reconstructed.txt docstring_tokens
-    
-    1) "xlcost_java.jsonl" is your XLCoST file containing JSON lines with 'docstring_tokens' or 'code_tokens'.
-    2) "xlcost_java_reconstructed.txt" is the output file. The code snippet may be multi-line.
-    3) "docstring_tokens" (or "code_tokens") is the JSON key that holds the Java tokens you want to reconstruct.
+       python filter_by_subwords.py java.jsonl python.jsonl output.txt docstring_tokens
+
+    This script:
+      1) Reads Java from java.jsonl, Python from python.jsonl
+      2) Untokenizes each snippet
+      3) Tokenizes with CodeT5 -> if subword len > 512, skip
+      4) Interleaves remaining samples -> output.txt
+      5) Prints histogram of subword lengths
     """
-    if len(sys.argv) < 4:
-        print("Usage: python preprocess_xlcost_java.py <input_jsonl> <output_txt> <field_name>")
-        print("Example: python preprocess_xlcost_java.py xlcost_java.jsonl xlcost_java_recon.txt docstring_tokens")
+    if len(sys.argv) < 5:
+        print("Usage: python filter_by_subwords.py <java_jsonl> <python_jsonl> <output_txt> <field_name>")
         sys.exit(1)
 
-    input_jsonl_path = sys.argv[1]
-    output_txt_path = sys.argv[2]
-    field_name = sys.argv[3]
+    java_jsonl = sys.argv[1]
+    python_jsonl = sys.argv[2]
+    output_txt = sys.argv[3]
+    field_name = sys.argv[4]
 
-    preprocess_xlcost_java(input_jsonl_path, output_txt_path, field_name)
+    # Lists for subword lengths
+    java_subword_lengths = []
+    python_subword_lengths = []
+
+    # 1) Load & filter Java by subwords
+    java_data = load_and_filter_with_subwords(java_jsonl, field_name, "<JAVA>", java_subword_lengths)
+    # 2) Load & filter Python by subwords
+    python_data = load_and_filter_with_subwords(python_jsonl, field_name, "<PYTHON>", python_subword_lengths)
+
+    # 3) Interleave & write
+    interleave_and_write(java_data, python_data, output_txt)
+
+    # 4) Print histograms
+    print_histogram(java_subword_lengths, "Java")
+    print_histogram(python_subword_lengths, "Python")
