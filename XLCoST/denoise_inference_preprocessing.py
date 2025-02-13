@@ -8,18 +8,46 @@ def count_leading_spaces(line: str) -> int:
     """Count the number of leading spaces in the line."""
     return len(line) - len(line.lstrip(' '))
 
+def clean_java_lines(code_lines):
+    """
+    Remove Java comments (both single-line // and block comments /* ... */)
+    from the provided code lines.
+    Note: This is a simple regex-based approach and might not be perfect if comment
+    patterns appear in string literals.
+    """
+    # Join all lines into a single string
+    code_text = "\n".join(code_lines)
+    # Remove block comments (/* ... */) using DOTALL flag to capture newlines
+    code_text = re.sub(r'/\*.*?\*/', '', code_text, flags=re.DOTALL)
+    # Remove single-line comments (// ...)
+    cleaned_lines = []
+    for line in code_text.splitlines():
+        # Remove anything after //, if present.
+        line = re.sub(r'//.*$', '', line)
+        if line.strip():
+            cleaned_lines.append(line)
+    return cleaned_lines
+
 def flatten_java_code(code_lines):
     """
     Convert multi-line Java code into a single line with minimal spacing,
-    mimicking your example style.
+    mimicking your example style:
+        import java.util.*; class GFG{ static ... } ...
+    Steps:
+      1) Remove comments and strip each line, skipping blank lines.
+      2) Join lines with a single space.
+      3) Collapse multiple spaces into one.
+      4) Remove space before '{' or '}'.
     """
-    # 1) Strip each line and skip blank lines.
-    stripped_lines = [ln.strip() for ln in code_lines if ln.strip()]
-    # 2) Join with a single space.
+    # Remove comments first
+    cleaned_lines = clean_java_lines(code_lines)
+    # Strip each line and skip blank lines.
+    stripped_lines = [ln.strip() for ln in cleaned_lines if ln.strip()]
+    # Join with a single space.
     merged = " ".join(stripped_lines)
-    # 3) Collapse multiple spaces into one.
+    # Collapse multiple spaces into one.
     merged = re.sub(r"\s+", " ", merged)
-    # 4) Remove space before any curly brace.
+    # Remove space before any curly brace.
     merged = re.sub(r"\s+([{}])", r"\1", merged)
     return merged
 
@@ -70,7 +98,10 @@ def python_lines_with_indent_tokens(code_lines, spaces_per_level=4):
 
 def wrap_as_java(code_lines):
     """
-    Process Java code by flattening it into one line and wrapping with <JAVA>.
+    Process Java code:
+      - Remove comments.
+      - Flatten the code into one line.
+      - Wrap with <JAVA> tags.
     """
     flattened = flatten_java_code(code_lines)
     return f"<JAVA>\n{flattened}"
@@ -80,7 +111,7 @@ def wrap_as_python(code_lines, spaces_per_level=4):
     Process Python code:
       1) Clean the lines (remove blank lines and comments).
       2) Insert INDENT/DEDENT tokens based on indentation.
-      3) Wrap with <PYTHON>.
+      3) Wrap with <PYTHON> tags.
     """
     cleaned = clean_python_lines(code_lines)
     processed = python_lines_with_indent_tokens(cleaned, spaces_per_level)

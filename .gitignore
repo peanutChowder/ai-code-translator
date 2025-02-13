@@ -5,3 +5,4 @@ venv/
 *.txt
 *.png
 .DS_Store
+test_code_snippets/
