@@ -11,9 +11,9 @@ from transformers import (
 )
 
 ####################
-# Simplified Config #
+# Config #
 ####################
-MODEL_NAME = "Salesforce/codet5-base"
+MODEL_NAME = "Salesforce/codet5-small"
 DATA_PATH = "/kaggle/input/xlcost-detokenized-pythonflattened"
 MAX_SOURCE_LENGTH = 512
 MAX_TARGET_LENGTH = 512
@@ -28,7 +28,8 @@ SEED = 42
 # Special tokens and initialization
 LANG_TAGS = ["<JAVA>", "<PYTHON>"]
 SPECIAL_TOKENS = ["NEW_LINE", "INDENT", "DEDENT"] + LANG_TAGS
-MASK_TOKENS = [f"<extra_id_{i}>" for i in range(100)]
+PROTECTED_TOKENS = set(LANG_TAGS + ["NEW_LINE", "INDENT", "DEDENT"])
+MASK_TOKENS = [f"<extra_id_{i}>" for i in range(100)]  # Part of T5's existing vocab
 
 random.seed(SEED)
 np.random.seed(SEED)
@@ -37,24 +38,23 @@ torch.cuda.manual_seed_all(SEED)
 
 
 ########################
-# 1. Verified Tokenizer #
+# 1. Tokenizer #
 ########################
 def get_tokenizer():
     tokenizer = RobertaTokenizer.from_pretrained(MODEL_NAME)
-    tokenizer.add_tokens(SPECIAL_TOKENS + MASK_TOKENS, special_tokens=True)
+    tokenizer.add_tokens(SPECIAL_TOKENS, special_tokens=True)
     return tokenizer
 
 
 ########################
-# 2. Safe Map-style Dataset #
+# 2. Dataset #
 ########################
 class CodeDenoisingDataset(Dataset):
     def __init__(self, file_type: str, tokenizer: RobertaTokenizer):
         self.tokenizer = tokenizer
-        self.samples = self._load_and_validate_samples(file_type)
+        self.raw_samples = self._load_samples(file_type)
 
-    def _load_and_validate_samples(self, file_type: str) -> list:
-        """Load and validate all samples before training"""
+    def _load_samples(self, file_type: str) -> list:
         file_path = f"{DATA_PATH}/{file_type}.txt"
         samples = []
         current_lang = None
@@ -72,64 +72,74 @@ class CodeDenoisingDataset(Dataset):
                     current_lines.append(line)
             if current_lang and current_lines:
                 samples.append((current_lang, " ".join(current_lines)))
-
-        # Preprocess all samples upfront
-        processed = []
-        for lang, code in samples:
-            result = self._corrupt_sample(lang, code)
-            if result["input_text"] and result["target_text"]:
-                processed.append(result)
-        return processed
+        return samples
 
     def _corrupt_sample(self, lang_tag: str, code_str: str) -> dict:
-        """Simplified span corruption with validation"""
         full_text = f"{lang_tag} {code_str}"
-        tokens = self.tokenizer.tokenize(full_text)
+        words = full_text.split()
 
-        protected = {i for i, tok in enumerate(tokens)
-                     if tok in SPECIAL_TOKENS or tok == lang_tag}
+        masked_tokens = []
+        target_spans = []
+        mask_count = 0
+        i = 0
 
-        corrupted = []
-        available_indices = [i for i in range(len(tokens)) if i not in protected]
-        np.random.shuffle(available_indices)
+        while i < len(words) and mask_count < len(MASK_TOKENS):
+            # Skip protected tokens
+            if words[i] in PROTECTED_TOKENS:
+                masked_tokens.append(words[i])
+                i += 1
+                continue
 
-        mask_budget = int(len(available_indices) * MASK_RATIO)
-        while mask_budget > 0 and available_indices:
-            span_len = min(np.random.randint(SPAN_MIN, SPAN_MAX + 1), mask_budget)
-            span = available_indices[:span_len]
-            del available_indices[:span_len]
+            if random.random() < MASK_RATIO:
+                span_len = np.random.randint(SPAN_MIN, SPAN_MAX + 1)
+                span = []
 
-            if not span:
-                break
+                # Collect non-protected tokens for span
+                j = i
+                while j < len(words) and len(span) < span_len:
+                    if words[j] not in PROTECTED_TOKENS:
+                        span.append(words[j])
+                    j += 1
 
-            corrupted.append(f"<extra_id_{len(corrupted)}>")
-            mask_budget -= len(span)
+                if len(span) == 0:
+                    i += 1
+                    continue
+
+                masked_tokens.append(MASK_TOKENS[mask_count])
+                target_spans.append(f"{MASK_TOKENS[mask_count]} {' '.join(span)}")
+                mask_count += 1
+                i = j  # Move past the span
+            else:
+                masked_tokens.append(words[i])
+                i += 1
+
+        # Add remaining words
+        masked_tokens.extend(words[i:])
 
         return {
-            "input_text": " ".join(corrupted) if corrupted else "<no_mask>",
-            "target_text": full_text
+            "input_text": " ".join(masked_tokens),
+            "target_text": " ".join(target_spans) if target_spans else full_text
         }
 
     def __len__(self):
-        return len(self.samples)
+        return len(self.raw_samples)
 
     def __getitem__(self, idx):
-        return self.samples[idx]
+        lang, code = self.raw_samples[idx]
+        return self._corrupt_sample(lang, code)
 
 
 ########################
-# 3. Simplified Training #
+# 3. Training #
 ########################
 def main():
     tokenizer = get_tokenizer()
     model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME)
     model.resize_token_embeddings(len(tokenizer))
 
-    # Load datasets upfront with validation
     train_dataset = CodeDenoisingDataset("train", tokenizer)
     val_dataset = CodeDenoisingDataset("val", tokenizer)
 
-    # Training arguments (simplified)
     training_args = TrainingArguments(
         output_dir="/kaggle/working/output",
         per_device_train_batch_size=BATCH_SIZE,
@@ -138,12 +148,11 @@ def main():
         fp16=True,
         logging_steps=100,
         save_steps=500,
+        save_total_limit=2,
         remove_unused_columns=False,
         report_to="wandb"
-
     )
 
-    # Collator with validation
     def collate_fn(batch):
         inputs = [item["input_text"] for item in batch]
         targets = [item["target_text"] for item in batch]
@@ -168,7 +177,6 @@ def main():
         model_inputs["labels"] = labels
         return model_inputs
 
-    # Create trainer
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -177,7 +185,6 @@ def main():
         data_collator=collate_fn,
     )
 
-    # Start training
     trainer.train()
     trainer.save_model("/kaggle/working/final_model")
 
