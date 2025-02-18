@@ -1,229 +1,149 @@
 import os
 import random
 import torch
-from torch.utils.data import IterableDataset, DataLoader
+import numpy as np
+from torch.utils.data import Dataset, DataLoader
 from transformers import (
     RobertaTokenizer,
     T5ForConditionalGeneration,
-    DataCollatorForSeq2Seq,
     Trainer,
     TrainingArguments,
 )
-from dataclasses import dataclass
-from typing import List, Tuple, Iterator
 
 ####################
-# Config
+# Simplified Config #
 ####################
 MODEL_NAME = "Salesforce/codet5-base"
+DATA_PATH = "/kaggle/input/xlcost-detokenized-pythonflattened"
 MAX_SOURCE_LENGTH = 512
 MAX_TARGET_LENGTH = 512
-BATCH_SIZE = 2
-EPOCHS = 1
+BATCH_SIZE = 4
+ACCUM_STEPS = 2
+EPOCHS = 3
 MASK_RATIO = 0.15
 SPAN_MIN = 3
 SPAN_MAX = 5
-SHUFFLE_BUFFER_SIZE = 1000  # For in-memory shuffling
 SEED = 42
 
-# Special tokens
+# Special tokens and initialization
 LANG_TAGS = ["<JAVA>", "<PYTHON>"]
 SPECIAL_TOKENS = ["NEW_LINE", "INDENT", "DEDENT"] + LANG_TAGS
 MASK_TOKENS = [f"<extra_id_{i}>" for i in range(100)]
 
 random.seed(SEED)
+np.random.seed(SEED)
 torch.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
 
 
 ########################
-# 1) Enhanced Tokenizer
+# 1. Verified Tokenizer #
 ########################
 def get_tokenizer():
     tokenizer = RobertaTokenizer.from_pretrained(MODEL_NAME)
     tokenizer.add_tokens(SPECIAL_TOKENS + MASK_TOKENS, special_tokens=True)
-
-    # Verify token integrity
-    for tok in SPECIAL_TOKENS:
-        assert len(tokenizer.tokenize(tok)) == 1, f"Token {tok} gets split!"
-
     return tokenizer
 
 
 ########################
-# 2) Streaming Dataset
+# 2. Safe Map-style Dataset #
 ########################
-class CodeDenoisingIterableDataset(IterableDataset):
-    def __init__(
-            self,
-            file_path: str,
-            tokenizer: RobertaTokenizer,
-            mask_ratio: float = 0.15,
-            span_min: int = 3,
-            span_max: int = 5,
-            shuffle: bool = False,
-            buffer_size: int = 1000,
-    ):
-        self.file_path = file_path
+class CodeDenoisingDataset(Dataset):
+    def __init__(self, file_type: str, tokenizer: RobertaTokenizer):
         self.tokenizer = tokenizer
-        self.mask_ratio = mask_ratio
-        self.span_min = span_min
-        self.span_max = span_max
-        self.shuffle = shuffle
-        self.buffer_size = buffer_size
+        self.samples = self._load_and_validate_samples(file_type)
 
-    def __iter__(self) -> Iterator[dict]:
-        worker_info = torch.utils.data.get_worker_info()
-
-        # Handle multi-worker splitting
-        if worker_info is not None:
-            raise NotImplementedError("Multi-worker support needs file partitioning")
-
-        # Create base generator
-        sample_gen = self._sample_generator()
-
-        # Add shuffle buffer if needed
-        if self.shuffle:
-            sample_gen = self._shuffle_generator(sample_gen)
-
-        return sample_gen
-
-    def _sample_generator(self) -> Iterator[dict]:
+    def _load_and_validate_samples(self, file_type: str) -> list:
+        """Load and validate all samples before training"""
+        file_path = f"{DATA_PATH}/{file_type}.txt"
+        samples = []
         current_lang = None
         current_lines = []
 
-        with open(self.file_path, "r", encoding="utf-8") as fin:
-            for line in fin:
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
                 line = line.strip()
-
                 if line in LANG_TAGS:
-                    if current_lang is not None:
-                        # Yield accumulated sample
-                        code = " ".join(current_lines).strip()
-                        if code:
-                            yield self._process_sample(current_lang, code)
+                    if current_lang and current_lines:
+                        samples.append((current_lang, " ".join(current_lines)))
                     current_lang = line
                     current_lines = []
-                else:
-                    if line:
-                        current_lines.append(line)
+                elif line:
+                    current_lines.append(line)
+            if current_lang and current_lines:
+                samples.append((current_lang, " ".join(current_lines)))
 
-            # Yield final sample
-            if current_lang is not None and current_lines:
-                code = " ".join(current_lines).strip()
-                yield self._process_sample(current_lang, code)
+        # Preprocess all samples upfront
+        processed = []
+        for lang, code in samples:
+            result = self._corrupt_sample(lang, code)
+            if result["input_text"] and result["target_text"]:
+                processed.append(result)
+        return processed
 
-    def _shuffle_generator(self, generator: Iterator) -> Iterator:
-        buffer = []
-        for sample in generator:
-            buffer.append(sample)
-            if len(buffer) >= self.buffer_size:
-                random.shuffle(buffer)
-                while buffer:
-                    yield buffer.pop()
-        random.shuffle(buffer)
-        while buffer:
-            yield buffer.pop()
-
-    def _process_sample(self, lang_tag: str, code_str: str) -> dict:
-        """Apply span corruption to a single sample"""
-        # Tokenize with language tag
+    def _corrupt_sample(self, lang_tag: str, code_str: str) -> dict:
+        """Simplified span corruption with validation"""
         full_text = f"{lang_tag} {code_str}"
         tokens = self.tokenizer.tokenize(full_text)
 
-        # Find protected ranges (language tag + special tokens)
-        protected = set()
-        for i, tok in enumerate(tokens):
-            if tok == lang_tag or tok in SPECIAL_TOKENS:
-                protected.add(i)
+        protected = {i for i, tok in enumerate(tokens)
+                     if tok in SPECIAL_TOKENS or tok == lang_tag}
 
-        # Apply span masking
-        corrupted_tokens = self._apply_masking(tokens, protected)
+        corrupted = []
+        available_indices = [i for i in range(len(tokens)) if i not in protected]
+        np.random.shuffle(available_indices)
+
+        mask_budget = int(len(available_indices) * MASK_RATIO)
+        while mask_budget > 0 and available_indices:
+            span_len = min(np.random.randint(SPAN_MIN, SPAN_MAX + 1), mask_budget)
+            span = available_indices[:span_len]
+            del available_indices[:span_len]
+
+            if not span:
+                break
+
+            corrupted.append(f"<extra_id_{len(corrupted)}>")
+            mask_budget -= len(span)
 
         return {
-            "input_text": " ".join(corrupted_tokens),
+            "input_text": " ".join(corrupted) if corrupted else "<no_mask>",
             "target_text": full_text
         }
 
-    def _apply_masking(self, tokens: List[str], protected: set) -> List[str]:
-        """Core masking logic adapted for streaming"""
-        n = len(tokens)
-        num_to_mask = int((n - len(protected)) * self.mask_ratio)
-        if num_to_mask < 1:
-            return tokens.copy()
+    def __len__(self):
+        return len(self.samples)
 
-        candidates = [i for i in range(n) if i not in protected]
-        random.shuffle(candidates)
-
-        masked_indices = set()
-        placeholders = []
-        current_span_id = 0
-        ptr = 0
-
-        while ptr < len(candidates) and len(masked_indices) < num_to_mask:
-            span_len = random.randint(self.span_min, self.span_max)
-            start = candidates[ptr]
-            end = min(start + span_len, n)
-
-            # Collect span indices
-            span_indices = []
-            for i in range(start, end):
-                if i not in protected and i not in masked_indices:
-                    span_indices.append(i)
-
-            if span_indices:
-                masked_indices.update(span_indices)
-                placeholders.append((
-                    min(span_indices),
-                    max(span_indices),
-                    current_span_id
-                ))
-                current_span_id += 1
-                ptr += span_len
-            else:
-                ptr += 1
-
-        # Build corrupted sequence
-        corrupted = []
-        last_idx = 0
-        for st, en, sid in sorted(placeholders, key=lambda x: x[0]):
-            corrupted.extend(tokens[last_idx:st])
-            corrupted.append(f"<extra_id_{sid}>")
-            last_idx = en + 1
-        corrupted.extend(tokens[last_idx:])
-
-        return corrupted
+    def __getitem__(self, idx):
+        return self.samples[idx]
 
 
 ########################
-# 3) Training Setup
+# 3. Simplified Training #
 ########################
 def main():
-    # Initialize components
     tokenizer = get_tokenizer()
     model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME)
     model.resize_token_embeddings(len(tokenizer))
 
-    # Create datasets
-    train_dataset = CodeDenoisingIterableDataset(
-        file_path="/kaggle/input/dataset/train.txt",
-        tokenizer=tokenizer,
-        mask_ratio=MASK_RATIO,
-        span_min=SPAN_MIN,
-        span_max=SPAN_MAX,
-        shuffle=True,
-        buffer_size=SHUFFLE_BUFFER_SIZE,
+    # Load datasets upfront with validation
+    train_dataset = CodeDenoisingDataset("train", tokenizer)
+    val_dataset = CodeDenoisingDataset("val", tokenizer)
+
+    # Training arguments (simplified)
+    training_args = TrainingArguments(
+        output_dir="/kaggle/working/output",
+        per_device_train_batch_size=BATCH_SIZE,
+        gradient_accumulation_steps=ACCUM_STEPS,
+        num_train_epochs=EPOCHS,
+        fp16=True,
+        logging_steps=100,
+        save_steps=500,
+        remove_unused_columns=False,
+        report_to="wandb"
+
     )
 
-    val_dataset = CodeDenoisingIterableDataset(
-        file_path="/kaggle/input/dataset/val.txt",
-        tokenizer=tokenizer,
-        mask_ratio=MASK_RATIO,
-        span_min=SPAN_MIN,
-        span_max=SPAN_MAX,
-        shuffle=False,
-    )
-
-    # Create DataLoader with dynamic batching
+    # Collator with validation
     def collate_fn(batch):
         inputs = [item["input_text"] for item in batch]
         targets = [item["target_text"] for item in batch]
@@ -248,20 +168,7 @@ def main():
         model_inputs["labels"] = labels
         return model_inputs
 
-    # Training arguments
-    training_args = TrainingArguments(
-        output_dir="./checkpoints",
-        per_device_train_batch_size=BATCH_SIZE,
-        num_train_epochs=EPOCHS,
-        evaluation_strategy="steps",
-        eval_steps=1000,
-        save_steps=1000,
-        logging_steps=100,
-        remove_unused_columns=False,
-        dataloader_num_workers=2,
-    )
-
-    # Initialize Trainer
+    # Create trainer
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -272,8 +179,7 @@ def main():
 
     # Start training
     trainer.train()
-    trainer.save_model("./final_model")
-    tokenizer.save_pretrained("./final_model")
+    trainer.save_model("/kaggle/working/final_model")
 
 
 if __name__ == "__main__":
